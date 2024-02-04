@@ -1355,7 +1355,8 @@ void CompilerHLSL::emit_builtin_variables()
 
 		case BuiltInLaunchIdKHR:
 		case BuiltInLaunchSizeKHR:
-			type = "uint3";
+			if (!hlsl_options.back_to_dxc_raytracing)
+				type = "uint3";
 			break;
 
 		default:
@@ -1789,6 +1790,30 @@ void CompilerHLSL::emit_resources()
 			emit_uniform(var);
 			emitted = true;
 		}
+
+		// Raytracing pipelines in HLSL use struct definitions in the function scope.
+		// While GLSL uses the struct definitions in the global scope.
+		// So we record the struct definitions here and add them as statements later.
+		// The OpStore on the payload elements should remain as they are.
+		if (var.storage == StorageClassRayPayloadKHR || var.storage == StorageClassHitAttributeKHR)
+		{
+			auto entrypoint = get_entry_point();
+			auto &function = this->get<SPIRFunction>(entrypoint.self);
+			// Check if the variable is used in the entry point.
+			bool already_stored = false;
+			for (auto id : function.outgoing_ray_payloads)
+			{
+				if (id == var.self)
+				{
+					already_stored = true;
+					break;
+				}
+			}
+			if (!already_stored)
+			{
+				function.outgoing_ray_payloads.push_back(var.self);
+			}
+		}
 	});
 
 	if (emitted)
@@ -1907,7 +1932,7 @@ void CompilerHLSL::emit_resources()
 	input_builtins.clear(BuiltInSubgroupGtMask);
 	input_builtins.clear(BuiltInSubgroupGeMask);
 
-	if (!input_variables.empty() || !input_builtins.empty())
+	if ((!input_variables.empty() || !input_builtins.empty()) && !hlsl_options.back_to_dxc_raytracing)
 	{
 		require_input = true;
 		statement("struct SPIRV_Cross_Input");
@@ -3027,9 +3052,7 @@ string CompilerHLSL::get_inner_entry_point_name() const
 	else if (execution.model == ExecutionModelTaskEXT)
 		return "task_main";
 	else if (execution.model == ExecutionModelRayGenerationKHR)
-	{
 		return "raygen_main";
-	}
 	else
 		SPIRV_CROSS_THROW("Unsupported execution model.");
 }
@@ -3043,6 +3066,36 @@ void CompilerHLSL::emit_function_prototype(SPIRFunction &func, const Bitset &ret
 	local_variable_names = resource_names;
 
 	string decl;
+
+	string hlsl_shader_type = "";
+
+	auto &execution = get_entry_point();
+	switch (execution.model)
+	{
+	case ExecutionModelRayGenerationKHR:
+		hlsl_shader_type = "raygeneration";
+		break;
+	case ExecutionModelIntersectionKHR:
+		hlsl_shader_type = "intersection";
+		break;
+	case ExecutionModelAnyHitKHR:
+		hlsl_shader_type = "anyhit";
+		break;
+	case ExecutionModelClosestHitKHR:
+		hlsl_shader_type = "closesthit";
+		break;
+	case ExecutionModelMissKHR:
+		hlsl_shader_type = "miss";
+		break;
+
+	default:
+		break;
+	}
+
+	if (!hlsl_shader_type.empty() && hlsl_options.back_to_dxc_raytracing)
+	{
+		decl += "[shader(\"" + hlsl_shader_type + "\")]\n";
+	}
 
 	auto &type = get<SPIRType>(func.return_type);
 	if (type.array.empty())
@@ -6848,7 +6901,10 @@ string CompilerHLSL::compile()
 		emit_resources();
 
 		emit_function(get<SPIRFunction>(ir.default_entry_point), Bitset());
-		emit_hlsl_entry_point();
+		if (!hlsl_options.back_to_dxc_raytracing)
+		{
+			emit_hlsl_entry_point();
+		}
 
 		pass_count++;
 	} while (is_forcing_recompilation());

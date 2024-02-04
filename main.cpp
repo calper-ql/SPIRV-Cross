@@ -760,6 +760,7 @@ struct CLIArguments
 	bool hlsl_enable_16bit_types = false;
 	bool hlsl_flatten_matrix_vertex_input_semantics = false;
 	bool hlsl_preserve_structured_buffers = false;
+	bool hlsl_back_to_dxc_raytracing = false;
 	HLSLBindingFlags hlsl_binding_flags = 0;
 	bool vulkan_semantics = false;
 	bool flatten_multidimensional_arrays = false;
@@ -868,6 +869,7 @@ static void print_help_hlsl()
 	                "\t[--hlsl-enable-16bit-types]:\n\t\tEnables native use of half/int16_t/uint16_t and ByteAddressBuffer interaction with these types. Requires SM 6.2.\n"
 	                "\t[--hlsl-flatten-matrix-vertex-input-semantics]:\n\t\tEmits matrix vertex inputs with input semantics as if they were independent vectors, e.g. TEXCOORD{2,3,4} rather than matrix form TEXCOORD2_{0,1,2}.\n"
 	                "\t[--hlsl-preserve-structured-buffers]:\n\t\tEmit SturucturedBuffer<T> rather than ByteAddressBuffer. Requires UserTypeGOOGLE to be emitted. Intended for DXC roundtrips.\n"
+					"\t[--hlsl-back-to-dxc-raytracing]:\n\t\tPrevents the writing of SPIRV_Cross_Input and the main function as a primitive store point. Will also mark the raytracing pipeline stage names to the target function.\n"
 	);
 	// clang-format on
 }
@@ -1466,6 +1468,7 @@ static string compile_iteration(const CLIArguments &args, std::vector<uint32_t> 
 		hlsl_opts.enable_16bit_types = args.hlsl_enable_16bit_types;
 		hlsl_opts.flatten_matrix_vertex_input_semantics = args.hlsl_flatten_matrix_vertex_input_semantics;
 		hlsl_opts.preserve_structured_buffers = args.hlsl_preserve_structured_buffers;
+		hlsl_opts.back_to_dxc_raytracing = args.hlsl_back_to_dxc_raytracing;
 		hlsl->set_hlsl_options(hlsl_opts);
 		hlsl->set_resource_binding_flags(args.hlsl_binding_flags);
 		if (args.hlsl_base_vertex_index_explicit_binding)
@@ -1668,6 +1671,7 @@ static int main_inner(int argc, char *argv[])
 	        [&args](CLIParser &) { args.hlsl_flatten_matrix_vertex_input_semantics = true; });
 	cbs.add("--hlsl-preserve-structured-buffers",
 	        [&args](CLIParser &) { args.hlsl_preserve_structured_buffers = true; });
+	cbs.add("--hlsl-back-to-dxc-raytracing", [&args](CLIParser &) { args.hlsl_back_to_dxc_raytracing = true; });
 	cbs.add("--vulkan-semantics", [&args](CLIParser &) { args.vulkan_semantics = true; });
 	cbs.add("-V", [&args](CLIParser &) { args.vulkan_semantics = true; });
 	cbs.add("--flatten-multidimensional-arrays", [&args](CLIParser &) { args.flatten_multidimensional_arrays = true; });

@@ -16195,6 +16195,15 @@ void CompilerGLSL::emit_function(SPIRFunction &func, const Bitset &return_flags)
 	current_function = &func;
 	auto &entry_block = get<SPIRBlock>(func.entry_block);
 
+	for (auto v : func.outgoing_ray_payloads)
+	{
+		// The ray payloads here will only be populated for HLSL ray tracing shaders.
+		auto var = get<SPIRVariable>(v);
+		auto &type = get<SPIRType>(var.basetype);
+		string type_name = type_to_glsl(type);
+		statement(type_name + " ", to_name(var.self), ";");
+	}
+
 	sort(begin(func.constant_arrays_needed_on_stack), end(func.constant_arrays_needed_on_stack));
 	for (auto &array : func.constant_arrays_needed_on_stack)
 	{

@@ -1023,6 +1023,10 @@ struct SPIRFunction : IVariant
 	// consider arrays value types.
 	SmallVector<ID> constant_arrays_needed_on_stack;
 
+	// Ray payloads for languages that can't declare them in the global scope.
+	// These will be declared as local variables in the function instead.
+	Vector<VariableID> outgoing_ray_payloads;
+
 	bool active = false;
 	bool flush_undeclared = true;
 	bool do_combined_parameters = true;
