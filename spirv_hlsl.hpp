@@ -299,6 +299,10 @@ private:
 
 	bool is_hlsl_force_storage_buffer_as_uav(ID id) const;
 
+	std::string emit_resource_descriptor_heap_lookup(const Instruction &i);
+
+	bool is_resource_descriptor_heap_bound(const SPIRVariable &var) const;
+
 	Options hlsl_options;
 
 	// TODO: Refactor this to be more similar to MSL, maybe have some common system in place?

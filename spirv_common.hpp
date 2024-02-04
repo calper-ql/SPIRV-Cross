@@ -1006,6 +1006,14 @@ struct SPIRFunction : IVariant
 		arguments.push_back({ parameter_type, id, 0u, 0u, alias_global_variable });
 	}
 
+	bool has_parameter(ID id) const
+	{
+		for (auto &arg : arguments)
+			if (arg.id == id)
+				return true;
+		return false;
+	}
+
 	// Hooks to be run when the function returns.
 	// Mostly used for lowering internal data structures onto flattened structures.
 	// Need to defer this, because they might rely on things which change during compilation.
