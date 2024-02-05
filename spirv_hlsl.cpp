@@ -1884,7 +1884,8 @@ void CompilerHLSL::emit_resources()
 			auto &func = this->get<SPIRFunction>(entrypoint.self);
 			if (!func.has_parameter(var.self))
 			{
-				func.add_parameter(var.basetype, var.self);
+				// incoming payload must be inout.
+				func.arguments.push_back({ var.basetype, var.self, 1u, 1u, false });
 			}
 		}
 
