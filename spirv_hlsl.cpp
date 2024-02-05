@@ -7161,8 +7161,7 @@ string CompilerHLSL::emit_resource_descriptor_heap_lookup(const Instruction &i)
 		resource_type = "Texture2D<float4> ";
 	}
 
-	string rdh_pull = join(resource_type, resource_binding_name, " = ResourceDescriptorHeap[",
-	                       backend.nonuniform_qualifier, "(", lookup_expr, ")];");
+	string rdh_pull = join(resource_type, resource_binding_name, " = ResourceDescriptorHeap[", lookup_expr, "];");
 
 	statement(rdh_pull);
 
