@@ -26,6 +26,7 @@
 #include "GLSL.std.450.h"
 #include <algorithm>
 #include <assert.h>
+#include <sstream>
 
 using namespace spv;
 using namespace SPIRV_CROSS_NAMESPACE;
@@ -906,6 +907,20 @@ void CompilerHLSL::emit_builtin_inputs_in_struct()
 			semantic = "SV_RenderTargetArrayIndex";
 			break;
 
+		case BuiltInLaunchIdKHR:
+			if (hlsl_options.shader_model < 60)
+				SPIRV_CROSS_THROW("Launch ID input is only supported in CS 6.0 or higher.");
+			type = "uint3";
+			semantic = "SV_DispatchThreadID";
+			break;
+
+		case BuiltInLaunchSizeKHR:
+			if (hlsl_options.shader_model < 60)
+				SPIRV_CROSS_THROW("Launch size input is only supported in CS 6.0 or higher.");
+			type = "uint3";
+			semantic = "SV_GroupID";
+			break;
+
 		default:
 			SPIRV_CROSS_THROW("Unsupported builtin in HLSL.");
 		}
@@ -1114,7 +1129,15 @@ std::string CompilerHLSL::builtin_to_glsl(spv::BuiltIn builtin, spv::StorageClas
 	case BuiltInVertexId:
 		return "gl_VertexID";
 	case BuiltInInstanceId:
-		return "gl_InstanceID";
+		if (hlsl_options.back_to_dxc_raytracing)
+		{
+			// This is overloaded for the raytracing system value if we are using DXC.
+			return "InstanceID()";
+		}
+		else
+		{
+			return "gl_InstanceID";
+		}
 	case BuiltInNumWorkgroups:
 	{
 		if (!num_workgroups_builtin)
@@ -1136,6 +1159,49 @@ std::string CompilerHLSL::builtin_to_glsl(spv::BuiltIn builtin, spv::StorageClas
 		return "WaveGetLaneCount()";
 	case BuiltInHelperInvocation:
 		return "IsHelperLane()";
+
+	// Raytracing system value intrinsics.
+	// Ray dispatch system values.
+	case BuiltInLaunchIdKHR:
+		return "DispatchRaysIndex()";
+	case BuiltInLaunchSizeKHR:
+		return "DispatchRaysDimensions()";
+
+	// Ray system values.
+	case BuiltInWorldRayOriginKHR:
+		return "WorldRayOrigin()";
+	case BuiltInWorldRayDirectionKHR:
+		return "WorldRayDirection()";
+	case BuiltInRayTminKHR:
+		return "RayTmin()";
+	case BuiltInHitTNV:
+		return "RayTCurrent()";
+	case BuiltInRayTmaxKHR:
+		return "RayTmax()";
+
+	// Primitive/objective space system values.
+	case BuiltInInstanceIndex:
+		return "InstanceIndex()";
+	// InstanceID is used in other places, so we handle it above.
+	case BuiltInPrimitiveId:
+		return "PrimitiveIndex()";
+	// HLSL RT 1.0 does not know about geometry index, and the docs are not updated.
+	// But it is available in 1.1.
+	case BuiltInRayGeometryIndexKHR:
+		return "GeometryIndex()";
+	case BuiltInObjectRayOriginKHR:
+		return "ObjectRayOrigin()";
+	case BuiltInObjectRayDirectionKHR:
+		return "ObjectRayDirection()";
+	// There is a bit of a mismatch here. SPIR-V does not specify the matrix orientation, but HLSL does. (4x3 matrices)
+	case BuiltInObjectToWorldKHR:
+		return "ObjectToWorld3x4()";
+	case BuiltInWorldToObjectKHR:
+		return "WorldToObject3x4()";
+
+	// Hit system values.
+	case BuiltInHitKindKHR:
+		return "HitKind()";
 
 	default:
 		return CompilerGLSL::builtin_to_glsl(builtin, storage);
@@ -1314,6 +1380,10 @@ void CompilerHLSL::emit_builtin_variables()
 			break;
 
 		case BuiltInPrimitiveId:
+			if (!hlsl_options.back_to_dxc_raytracing)
+				type = "uint";
+			break;
+
 		case BuiltInViewIndex:
 		case BuiltInLayer:
 			type = "uint";
@@ -1324,6 +1394,30 @@ void CompilerHLSL::emit_builtin_variables()
 		case BuiltInPrimitiveLineIndicesEXT:
 		case BuiltInCullPrimitiveEXT:
 			type = "uint";
+			break;
+
+		case BuiltInRayGeometryIndexKHR:
+			if (!hlsl_options.back_to_dxc_raytracing)
+				type = "uint";
+			break;
+
+		case BuiltInRayTminKHR:
+		case BuiltInRayTmaxKHR:
+			type = "float";
+			break;
+
+		case BuiltInLaunchIdKHR:
+		case BuiltInLaunchSizeKHR:
+			if (!hlsl_options.back_to_dxc_raytracing)
+				type = "uint3";
+			break;
+
+		case BuiltInWorldRayOriginKHR:
+		case BuiltInWorldRayDirectionKHR:
+		case BuiltInObjectRayOriginKHR:
+		case BuiltInObjectRayDirectionKHR:
+			if (!hlsl_options.back_to_dxc_raytracing)
+				type = "float3";
 			break;
 
 		default:
@@ -1756,6 +1850,53 @@ void CompilerHLSL::emit_resources()
 		{
 			emit_uniform(var);
 			emitted = true;
+			return;
+		}
+
+		// Raytracing pipelines in HLSL use struct definitions in the function scope.
+		// While GLSL uses the struct definitions in the global scope.
+		// So we record the struct definitions here and add them as statements later.
+		// The OpStore on the payload elements should remain as they are.
+		if (var.storage == StorageClassRayPayloadKHR)
+		{
+			auto entrypoint = get_entry_point();
+			auto &func = this->get<SPIRFunction>(entrypoint.self);
+			// Check if the variable is used in the entry point.
+			bool already_stored = false;
+			for (auto id : func.outgoing_ray_payloads)
+			{
+				if (id == var.self)
+				{
+					already_stored = true;
+					break;
+				}
+			}
+			if (!already_stored)
+			{
+				func.outgoing_ray_payloads.push_back(var.self);
+			}
+		}
+
+		// Incoming ray payload is handled in the entry point along with hit attributes.
+		if (var.storage == StorageClassIncomingRayPayloadKHR)
+		{
+			auto entrypoint = get_entry_point();
+			auto &func = this->get<SPIRFunction>(entrypoint.self);
+			if (!func.has_parameter(var.self))
+			{
+				// incoming payload must be inout.
+				func.arguments.push_back({ var.basetype, var.self, 1u, 1u, false });
+			}
+		}
+
+		if (var.storage == StorageClassHitAttributeKHR)
+		{
+			auto entrypoint = get_entry_point();
+			auto &func = this->get<SPIRFunction>(entrypoint.self);
+			if (!func.has_parameter(var.self))
+			{
+				func.add_parameter(var.basetype, var.self);
+			}
 		}
 	});
 
@@ -1875,7 +2016,7 @@ void CompilerHLSL::emit_resources()
 	input_builtins.clear(BuiltInSubgroupGtMask);
 	input_builtins.clear(BuiltInSubgroupGeMask);
 
-	if (!input_variables.empty() || !input_builtins.empty())
+	if ((!input_variables.empty() || !input_builtins.empty()) && !hlsl_options.back_to_dxc_raytracing)
 	{
 		require_input = true;
 		statement("struct SPIRV_Cross_Input");
@@ -2994,6 +3135,16 @@ string CompilerHLSL::get_inner_entry_point_name() const
 		return "mesh_main";
 	else if (execution.model == ExecutionModelTaskEXT)
 		return "task_main";
+	else if (execution.model == ExecutionModelRayGenerationKHR)
+		return "raygen_main";
+	else if (execution.model == ExecutionModelIntersectionKHR)
+		return "intersect_main";
+	else if (execution.model == ExecutionModelAnyHitKHR)
+		return "anyhit_main";
+	else if (execution.model == ExecutionModelClosestHitKHR)
+		return "closesthit_main";
+	else if (execution.model == ExecutionModelMissKHR)
+		return "miss_main";
 	else
 		SPIRV_CROSS_THROW("Unsupported execution model.");
 }
@@ -3007,6 +3158,36 @@ void CompilerHLSL::emit_function_prototype(SPIRFunction &func, const Bitset &ret
 	local_variable_names = resource_names;
 
 	string decl;
+
+	string hlsl_shader_type = "";
+
+	auto &execution = get_entry_point();
+	switch (execution.model)
+	{
+	case ExecutionModelRayGenerationKHR:
+		hlsl_shader_type = "raygeneration";
+		break;
+	case ExecutionModelIntersectionKHR:
+		hlsl_shader_type = "intersection";
+		break;
+	case ExecutionModelAnyHitKHR:
+		hlsl_shader_type = "anyhit";
+		break;
+	case ExecutionModelClosestHitKHR:
+		hlsl_shader_type = "closesthit";
+		break;
+	case ExecutionModelMissKHR:
+		hlsl_shader_type = "miss";
+		break;
+
+	default:
+		break;
+	}
+
+	if (!hlsl_shader_type.empty() && hlsl_options.back_to_dxc_raytracing)
+	{
+		decl += "[shader(\"" + hlsl_shader_type + "\")]\n";
+	}
 
 	auto &type = get<SPIRType>(func.return_type);
 	if (type.array.empty())
@@ -3384,7 +3565,7 @@ void CompilerHLSL::emit_hlsl_entry_point()
 	// Run the shader.
 	if (execution.model == ExecutionModelVertex || execution.model == ExecutionModelFragment ||
 	    execution.model == ExecutionModelGLCompute || execution.model == ExecutionModelMeshEXT ||
-	    execution.model == ExecutionModelTaskEXT)
+	    execution.model == ExecutionModelTaskEXT || execution.model == ExecutionModelRayGenerationKHR)
 	{
 		// For mesh shaders, we receive special arguments that we must pass down as function arguments.
 		// HLSL does not support proper reference types for passing these IO blocks,
@@ -3507,6 +3688,14 @@ void CompilerHLSL::emit_fixup()
 
 void CompilerHLSL::emit_texture_op(const Instruction &i, bool sparse)
 {
+	string resource_heap_lookup;
+	if (hlsl_options.back_to_dxc_raytracing)
+	{
+		// This will check for bound resource descriptor heaps and emit the appropriate lookup.
+		// If we have a valid lookup, we will use that instead.
+		resource_heap_lookup = emit_resource_descriptor_heap_lookup(i);
+	}
+
 	if (sparse)
 		SPIRV_CROSS_THROW("Sparse feedback not yet supported in HLSL.");
 
@@ -3534,6 +3723,10 @@ void CompilerHLSL::emit_texture_op(const Instruction &i, bool sparse)
 	}
 
 	auto img_expr = to_non_uniform_aware_expression(combined_image ? combined_image->image : img);
+	if (!resource_heap_lookup.empty())
+	{
+		img_expr = resource_heap_lookup;
+	}
 
 	inherited_expressions.push_back(coord);
 
@@ -3666,7 +3859,14 @@ void CompilerHLSL::emit_texture_op(const Instruction &i, bool sparse)
 			SPIRV_CROSS_THROW("texelFetch is not supported in HLSL shader model 2/3.");
 		}
 		texop += img_expr;
-		texop += ".Load";
+		if (resource_heap_lookup.empty())
+		{
+			texop += ".Load";
+		}
+		else
+		{
+			texop += ".Load4";
+		}
 	}
 	else if (op == OpImageQueryLod)
 	{
@@ -4150,6 +4350,12 @@ string CompilerHLSL::to_resource_register(HLSLBindingFlagBits flag, char space, 
 
 void CompilerHLSL::emit_modern_uniform(const SPIRVariable &var)
 {
+	if (hlsl_options.back_to_dxc_raytracing && is_resource_descriptor_heap_bound(var))
+	{
+		// Variable is resource descriptor heap bound so we  skip.
+		return;
+	}
+
 	auto &type = get<SPIRType>(var.basetype);
 	switch (type.basetype)
 	{
@@ -6568,6 +6774,17 @@ void CompilerHLSL::emit_instruction(const Instruction &instruction)
 		statement("SetMeshOutputCounts(", to_unpacked_expression(ops[0]), ", ", to_unpacked_expression(ops[1]), ");");
 		break;
 	}
+	case OpTraceRayKHR:
+	{
+		std::string ray_desc_name = get_unique_identifier();
+		statement("RayDesc ", ray_desc_name, " = {", to_expression(ops[6]), ", ", to_expression(ops[7]), ", ",
+		          to_expression(ops[8]), ", ", to_expression(ops[9]), "};");
+
+		statement("TraceRay(", to_non_uniform_aware_expression(ops[0]), ", ", to_expression(ops[1]), ", ",
+		          to_expression(ops[2]), ", ", to_expression(ops[3]), ", ", to_expression(ops[4]), ", ",
+		          to_expression(ops[5]), ", ", ray_desc_name, ", ", to_expression(ops[10]), ");");
+		break;
+	}
 	default:
 		CompilerGLSL::emit_instruction(instruction);
 		break;
@@ -6801,7 +7018,10 @@ string CompilerHLSL::compile()
 		emit_resources();
 
 		emit_function(get<SPIRFunction>(ir.default_entry_point), Bitset());
-		emit_hlsl_entry_point();
+		if (!hlsl_options.back_to_dxc_raytracing)
+		{
+			emit_hlsl_entry_point();
+		}
 
 		pass_count++;
 	} while (is_forcing_recompilation());
@@ -6877,6 +7097,189 @@ bool CompilerHLSL::is_hlsl_force_storage_buffer_as_uav(ID id) const
 	const uint32_t binding = get_decoration(id, spv::DecorationBinding);
 
 	return (force_uav_buffer_bindings.find({ desc_set, binding }) != force_uav_buffer_bindings.end());
+}
+
+string CompilerHLSL::emit_resource_descriptor_heap_lookup(const Instruction &i)
+{
+	// DXC needs to use ResourceDescriptorHeap for raytracing shaders
+	// if they are based on a lookup of the initial resource.
+	// What we are doing here works but it is far from ideal.
+	// But so is the concept of ResourceDescriptorHeap in the first place.
+	// It sure is convenient to have a single descriptor heap for all resources...
+
+	auto *ops = stream(i);
+	auto op = static_cast<Op>(i.op);
+	uint32_t length = i.length;
+
+	uint32_t result_type = ops[0];
+	uint32_t id = ops[1];
+	VariableID img = ops[2];
+	uint32_t coord = ops[3];
+
+	auto *combined_image = maybe_get<SPIRCombinedImageSampler>(img);
+
+	auto img_expr = to_non_uniform_aware_expression(combined_image ? combined_image->image : img);
+
+	string resource_binding_name = get_unique_identifier();
+	string resource_name;
+	string lookup_expr;
+
+	// Split the image expression into resource name and array lookup.
+	auto start_array_index = img_expr.find_first_of('[');
+	if (start_array_index != string::npos)
+	{
+		auto end_array_index = img_expr.find_last_of(']', img_expr.size() - 1);
+		if (end_array_index != string::npos)
+		{
+			resource_name = img_expr.substr(0, start_array_index);
+			lookup_expr = img_expr.substr(start_array_index + 1, end_array_index - start_array_index - 1);
+		}
+	}
+
+	// This should not happen, but just in case.
+	if (lookup_expr.empty())
+	{
+		return "";
+	}
+
+	// Extract the resource binding ID.
+	uint32_t resource_binding_id = 0;
+	stringstream ss(resource_name.substr(1)); // remove the _;
+	ss >> resource_binding_id;
+	VariableID resource_binding_variable_id = resource_binding_id;
+
+	// Check if the resource is in the descriptor heap.
+	auto &func = get<SPIRFunction>(ir.default_entry_point);
+	auto *resource_var = maybe_get<SPIRVariable>(resource_binding_variable_id);
+	if (!resource_var)
+	{
+		return "";
+	}
+
+	bool is_heap_bound = is_resource_descriptor_heap_bound(*resource_var);
+	if (!is_heap_bound)
+	{
+		return "";
+	}
+
+	std::string resource_type = "ByteAddressBuffer ";
+	if (op != OpImageFetch)
+	{
+		resource_type = "Texture2D<float4> ";
+	}
+
+	string rdh_pull = join(resource_type, resource_binding_name, " = ResourceDescriptorHeap[", lookup_expr, "];");
+
+	statement(rdh_pull);
+
+	// Emit the actual texture operation.
+	string texop;
+	string expr;
+
+	return resource_binding_name;
+}
+
+bool CompilerHLSL::is_resource_descriptor_heap_bound(const SPIRVariable &var) const
+{
+	const auto &type = get<SPIRType>(var.basetype);
+
+	// We can remap push constant blocks, even if they don't have any binding decoration.
+	if (type.storage != StorageClassPushConstant && !has_decoration(var.self, DecorationBinding))
+		return false;
+
+	char space = '\0';
+
+	HLSLBindingFlagBits resource_flags = HLSL_BINDING_AUTO_NONE_BIT;
+
+	switch (type.basetype)
+	{
+	case SPIRType::SampledImage:
+		space = 't'; // SRV
+		resource_flags = HLSL_BINDING_AUTO_SRV_BIT;
+		break;
+
+	case SPIRType::Image:
+		if (type.image.sampled == 2 && type.image.dim != DimSubpassData)
+		{
+			if (has_decoration(var.self, DecorationNonWritable) && hlsl_options.nonwritable_uav_texture_as_srv)
+			{
+				space = 't'; // SRV
+				resource_flags = HLSL_BINDING_AUTO_SRV_BIT;
+			}
+			else
+			{
+				space = 'u'; // UAV
+				resource_flags = HLSL_BINDING_AUTO_UAV_BIT;
+			}
+		}
+		else
+		{
+			space = 't'; // SRV
+			resource_flags = HLSL_BINDING_AUTO_SRV_BIT;
+		}
+		break;
+
+	case SPIRType::Sampler:
+		space = 's';
+		resource_flags = HLSL_BINDING_AUTO_SAMPLER_BIT;
+		break;
+
+	case SPIRType::AccelerationStructure:
+		space = 't'; // SRV
+		resource_flags = HLSL_BINDING_AUTO_SRV_BIT;
+		break;
+
+	case SPIRType::Struct:
+	{
+		auto storage = type.storage;
+		if (storage == StorageClassUniform)
+		{
+			if (has_decoration(type.self, DecorationBufferBlock))
+			{
+				Bitset flags = ir.get_buffer_block_flags(var);
+				bool is_readonly = flags.get(DecorationNonWritable) && !is_hlsl_force_storage_buffer_as_uav(var.self);
+				space = is_readonly ? 't' : 'u'; // UAV
+				resource_flags = is_readonly ? HLSL_BINDING_AUTO_SRV_BIT : HLSL_BINDING_AUTO_UAV_BIT;
+			}
+			else if (has_decoration(type.self, DecorationBlock))
+			{
+				space = 'b'; // Constant buffers
+				resource_flags = HLSL_BINDING_AUTO_CBV_BIT;
+			}
+		}
+		else if (storage == StorageClassPushConstant)
+		{
+			space = 'b'; // Constant buffers
+			resource_flags = HLSL_BINDING_AUTO_PUSH_CONSTANT_BIT;
+		}
+		else if (storage == StorageClassStorageBuffer)
+		{
+			// UAV or SRV depending on readonly flag.
+			Bitset flags = ir.get_buffer_block_flags(var);
+			bool is_readonly = flags.get(DecorationNonWritable) && !is_hlsl_force_storage_buffer_as_uav(var.self);
+			space = is_readonly ? 't' : 'u';
+			resource_flags = is_readonly ? HLSL_BINDING_AUTO_SRV_BIT : HLSL_BINDING_AUTO_UAV_BIT;
+		}
+
+		break;
+	}
+	default:
+		break;
+	}
+
+	if (!space)
+		return false;
+
+	uint32_t desc_set =
+	    resource_flags == HLSL_BINDING_AUTO_PUSH_CONSTANT_BIT ? ResourceBindingPushConstantDescriptorSet : 0u;
+	uint32_t binding = resource_flags == HLSL_BINDING_AUTO_PUSH_CONSTANT_BIT ? ResourceBindingPushConstantBinding : 0u;
+
+	if (has_decoration(var.self, DecorationBinding))
+		binding = get_decoration(var.self, DecorationBinding);
+	if (has_decoration(var.self, DecorationDescriptorSet))
+		desc_set = get_decoration(var.self, DecorationDescriptorSet);
+
+	return binding == 0 && desc_set == 0 && space == 't';
 }
 
 void CompilerHLSL::set_hlsl_force_storage_buffer_as_uav(uint32_t desc_set, uint32_t binding)

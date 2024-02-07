@@ -150,6 +150,11 @@ public:
 		// This relies on UserTypeGOOGLE to encode the buffer type either as "structuredbuffer" or "rwstructuredbuffer"
 		// whereas the type can be extended with an optional subtype, e.g. "structuredbuffer:int".
 		bool preserve_structured_buffers = false;
+
+		// Modifies the shader to be compiled by DXC with the raytracing extension enabled.
+		// By doing so it will omit the SPIRV_Cross_Input and the main function.
+		// It will also emit the raytracing shader type and the raytracing shader attributes.
+		bool back_to_dxc_raytracing = false;
 	};
 
 	explicit CompilerHLSL(std::vector<uint32_t> spirv_)
@@ -293,6 +298,10 @@ private:
 	SPIRType::BaseType get_builtin_basetype(spv::BuiltIn builtin, SPIRType::BaseType default_type) override;
 
 	bool is_hlsl_force_storage_buffer_as_uav(ID id) const;
+
+	std::string emit_resource_descriptor_heap_lookup(const Instruction &i);
+
+	bool is_resource_descriptor_heap_bound(const SPIRVariable &var) const;
 
 	Options hlsl_options;
 
