@@ -3859,7 +3859,14 @@ void CompilerHLSL::emit_texture_op(const Instruction &i, bool sparse)
 			SPIRV_CROSS_THROW("texelFetch is not supported in HLSL shader model 2/3.");
 		}
 		texop += img_expr;
-		texop += ".Load";
+		if (resource_heap_lookup.empty())
+		{
+			texop += ".Load";
+		}
+		else
+		{
+			texop += ".Load4";
+		}
 	}
 	else if (op == OpImageQueryLod)
 	{
@@ -7155,7 +7162,7 @@ string CompilerHLSL::emit_resource_descriptor_heap_lookup(const Instruction &i)
 		return "";
 	}
 
-	std::string resource_type = "Buffer<uint4> ";
+	std::string resource_type = "ByteAddressBuffer ";
 	if (op != OpImageFetch)
 	{
 		resource_type = "Texture2D<float4> ";
